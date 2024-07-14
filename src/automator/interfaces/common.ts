@@ -9,6 +9,7 @@ export interface AutomatorState
     | 'exchangeId'
     | 'tapsRecoverPerSec'
     | 'earnPassivePerSec'
+    | 'earnPerTap'
   > {
   energyBoostLastUpdate: number
   turboBoostLastUpdate: number

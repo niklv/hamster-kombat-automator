@@ -55,7 +55,7 @@ export class Axios {
     )
   }
 
-  async makeRequest(method: string, url: string, options: AxiosRequestConfig = {}) {
+  private async makeRequest(method: string, url: string, options: AxiosRequestConfig = {}) {
     try {
       const resp = await this.instance({
         ...options,

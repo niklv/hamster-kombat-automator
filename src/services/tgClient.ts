@@ -8,11 +8,7 @@ import { DB } from './db'
 import { log } from './logger'
 
 export class TGClient {
-  protected readonly client: AccountModel
-
-  constructor(account: AccountModel) {
-    this.client = account
-  }
+  constructor(protected readonly client: AccountModel) {}
 
   private async getClient() {
     try {

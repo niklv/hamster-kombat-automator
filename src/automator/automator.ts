@@ -1,20 +1,19 @@
 import { config } from '~/config'
-import { Axios, log, Proxy, TGClient } from '~/services'
+import { log, Proxy, TGClient } from '~/services'
 import { AutomatorState, ProfileModel, UpgradeItem } from './interfaces'
 import { AccountModel } from '~/interfaces'
-import { BOT_MASTER_AXIOS_CONFIG, DAILY_TASK_ID } from './constants'
-import { Api } from './api'
-import { msToTime, time, wait } from '~/utils'
+import { DAILY_TASK_ID } from './constants'
+import { ApiService } from './api'
+import { secToTime, time, wait } from '~/utils'
 import { formatNum, getRandomRangeNumber } from '~/helpers'
 import { ONE_DAY_TIMESTAMP, ONE_HOUR_TIMESTAMP } from '~/constants'
 import { FloodWaitError } from 'telegram/errors'
-import { AxiosRequestConfig } from 'axios'
 import { getDailyCombo } from '~/automator/utils'
+import { addHours, addSeconds, differenceInSeconds, min } from 'date-fns'
 
 const {
   taps_count_range,
   turbo_taps_count,
-  min_energy,
   sleep_between_taps,
   max_upgrade_lvl,
   tap_mode,
@@ -38,25 +37,14 @@ export class Automator extends TGClient {
     tapsRecoverPerSec: 0,
     lastCompletedDaily: 0,
     earnPassivePerSec: 0,
+    earnPerTap: 1,
   }
-  private isStateInit = false
-  private readonly ax: Axios
+  private isStateInited = false
+  private readonly api: ApiService
 
   constructor(props: AccountModel) {
     super(props)
-    const { headers, baseURL } = BOT_MASTER_AXIOS_CONFIG
-    let axiosConfig: AxiosRequestConfig = { baseURL, headers: { ...headers, ...props.agent } }
-
-    if (this.client?.proxyString) {
-      const agent = Proxy.getAgent(this.client.proxyString)
-      axiosConfig.httpsAgent = agent
-      axiosConfig.httpAgent = agent
-    }
-
-    this.ax = new Axios({
-      config: axiosConfig,
-      proxyString: props.proxyString,
-    })
+    this.api = new ApiService(props.agent, props.proxyString)
   }
 
   private updateState(info: ProfileModel['clickerUser']) {
@@ -76,19 +64,22 @@ export class Automator extends TGClient {
       maxEnergy: info.maxTaps,
       tapsRecoverPerSec: info.tapsRecoverPerSec,
       earnPassivePerSec: info.earnPassivePerSec,
+      earnPerTap: info.earnPerTap,
       lastCompletedDaily,
     }
-    this.isStateInit = true
+    this.isStateInited = true
   }
 
-  private async auth(tgWebData: string) {
-    await Api.login(this.ax, tgWebData, this.client.fingerprint)
+  private async refreshToken(tgWebData: string) {
+    if (time() - this.tokenCreatedTime < ONE_HOUR_TIMESTAMP) return
+    await this.api.login(tgWebData, this.client.fingerprint)
     this.tokenCreatedTime = time()
     log.success('Successfully authenticated', this.client.name)
+    await wait()
   }
 
-  private async setProfileInfo() {
-    const data = await Api.getProfileInfo(this.ax)
+  private async getProfileInfo() {
+    const data = await this.api.getProfileInfo()
     const { lastPassiveEarn, earnPassivePerHour, balanceCoins } = data
     this.updateState(data)
 
@@ -97,22 +88,26 @@ export class Automator extends TGClient {
       `Last passive earn: ${formatNum(lpe)} | EPH: ${formatNum(earnPassivePerHour)} | Balance: ${formatNum(balanceCoins)}`,
       this.client.name,
     )
+    await wait()
   }
 
   private async selectExchange() {
+    if (this.state.exchangeId !== 'hamster') return
     const exchange = 'okx'
-    const data = await Api.selectExchange(this.ax, exchange)
+    const data = await this.api.selectExchange(exchange)
     this.updateState(data)
 
     log.success(`Selected ${exchange} exchange`, this.client.name)
+    await wait()
   }
 
   private async completeDailyTask() {
-    const tasks = await Api.getTasks(this.ax)
+    if (time() - this.state.lastCompletedDaily < ONE_DAY_TIMESTAMP) return
+    const tasks = await this.api.getTasks()
     const dailyTask = tasks.find(({ id }) => id === DAILY_TASK_ID)
 
     if (!dailyTask?.isCompleted) {
-      const { rewardsByDays, days, completedAt } = await Api.completeTask(this.ax, DAILY_TASK_ID)
+      const { rewardsByDays, days, completedAt } = await this.api.completeTask(DAILY_TASK_ID)
 
       this.state.lastCompletedDaily = Math.floor(Date.parse(completedAt) / 1000)
       const reward = rewardsByDays?.[days - 1].rewardCoins
@@ -123,21 +118,22 @@ export class Automator extends TGClient {
           this.client.name,
         )
     }
+    await wait()
   }
 
   private async applyDailyTurbo() {
-    await Api.applyBoost(this.ax, 'BoostMaxTaps')
+    await this.api.applyBoost('BoostMaxTaps')
     log.info('Turbo has been applied', this.client.name)
     await wait()
     await this.sendTaps(turbo_taps_count)
   }
 
   private async applyDailyEnergy() {
-    const boosts = await Api.getBoosts(this.ax)
+    const boosts = await this.api.getBoosts()
     const { level, cooldownSeconds } = boosts.filter(({ id }) => id === 'BoostFullAvailableTaps')[0]
 
     if (level < 6 && cooldownSeconds === 0) {
-      const data = await Api.applyBoost(this.ax, 'BoostFullAvailableTaps')
+      const data = await this.api.applyBoost('BoostFullAvailableTaps')
       this.updateState(data)
 
       log.info(`Energy has been restored | Energy: ${data.availableTaps}`, this.client.name)
@@ -151,7 +147,7 @@ export class Automator extends TGClient {
     const [min, max] = taps_count_range
     const tapsCount = count || getRandomRangeNumber(min, max)
 
-    const data = await Api.sendTaps(this.ax, tapsCount, this.state.availableTaps)
+    const data = await this.api.sendTaps(tapsCount, this.state.availableTaps)
     this.updateState(data)
 
     log.success(
@@ -161,23 +157,26 @@ export class Automator extends TGClient {
   }
 
   private async claimCipher() {
+    if (time() < this.cipherAvailableAt) return
     try {
-      const { dailyCipher } = await Api.getConfig(this.ax)
+      const { dailyCipher } = await this.api.getConfig()
       const { remainSeconds, isClaimed, bonusCoins, cipher = '' } = dailyCipher
       const decodedCipher = atob(`${cipher.slice(0, 3)}${cipher.slice(4)}`)
       this.cipherAvailableAt = time() + 5 * 60 * 60
 
       if (remainSeconds === 0) {
         log.warn(`Cipher [${decodedCipher}] is expired!`, this.client.name)
+        await wait()
         return
       }
 
       if (isClaimed) {
         log.warn(`Cipher [${decodedCipher}] already claimed!`, this.client.name)
+        await wait()
         return
       }
 
-      const { clickerUser } = await Api.claimDailyCipher(this.ax, decodedCipher)
+      const { clickerUser } = await this.api.claimDailyCipher(decodedCipher)
       this.updateState(clickerUser)
 
       log.success(
@@ -187,11 +186,12 @@ export class Automator extends TGClient {
     } catch (e) {
       log.warn(String(e), this.client.name)
     }
+    await wait()
   }
 
   async claimCombo() {
     try {
-      await Api.claimCombo(this.ax)
+      await this.api.claimCombo()
       log.success(`Successfully claimed daily combo!`, this.client.name)
     } catch (e) {
       log.warn(`Daily combo claim is unavailable: ${e}`, this.client.name)
@@ -199,6 +199,7 @@ export class Automator extends TGClient {
   }
 
   async claimDailyCombo() {
+    if (time() < this.comboAvailableAt) return
     const { combo, date } = await getDailyCombo()
     let balance = this.state.balanceCoins
     const dayOfDate = Number(date.slice(0, 2))
@@ -207,12 +208,13 @@ export class Automator extends TGClient {
 
     if (dayOfDate !== currentDay) {
       log.warn('There is no new combo yet today', this.client.name)
+      await wait()
       return
     }
 
     log.info(`Available combo cards [${combo.join(', ')}] for ${date}`, this.client.name)
 
-    const upgrades = await this.getAvailableUpgrades()
+    const upgrades = await this.getPossibleUpgrades()
     const comboCards = upgrades.filter(({ id }) => combo.includes(id))
 
     if (comboCards.length !== 3) {
@@ -222,6 +224,7 @@ export class Automator extends TGClient {
         `Cant claim daily combo because of you have unavailable cards for this combo: [${unavailableCards.join(', ')}]`,
         this.client.name,
       )
+      await wait()
       return
     }
 
@@ -230,7 +233,7 @@ export class Automator extends TGClient {
 
     for (const { id, price, level } of comboCards) {
       if (balance >= price) {
-        await Api.buyUpgrade(this.ax, id)
+        await this.api.buyUpgrade(id)
         balance -= price
         await wait()
       } else {
@@ -242,7 +245,7 @@ export class Automator extends TGClient {
       }
     }
 
-    const data = await Api.getProfileInfo(this.ax)
+    const data = await this.api.getProfileInfo()
     this.updateState(data)
 
     if (unboughtCards.length === 3) {
@@ -253,91 +256,123 @@ export class Automator extends TGClient {
         this.client.name,
       )
     }
+    await wait()
   }
 
-  private async getAvailableUpgrades() {
-    const data = await Api.getUpgrades(this.ax)
+  private async tapCoins(): Promise<Date> {
+    // 1. first tap all available coins
+    while (this.state.earnPerTap < this.state.availableTaps) {
+      await this.sendTaps()
+      const [min, max] = sleep_between_taps
+      const sleepTime = getRandomRangeNumber(min, max)
+      await wait(sleepTime)
+    }
 
-    const channelsToSubscribe = data.filter(
+    // 2. apply daily energy if available
+    const isDailyEnergyReady = time() - this.state.energyBoostLastUpdate > ONE_HOUR_TIMESTAMP
+    if (isDailyEnergyReady && time() > this.energyBoostTimeout) {
+      await this.applyDailyEnergy()
+      await wait()
+      return this.tapCoins()
+    }
+
+    const { availableTaps, maxEnergy, tapsRecoverPerSec } = this.state
+    const sleepSeconds = (maxEnergy - availableTaps) / tapsRecoverPerSec
+
+    log.info(
+      `Minimum energy reached: ${availableTaps} | Approximate energy recovery time ${secToTime(sleepSeconds)}`,
+      this.client.name,
+    )
+
+    return addSeconds(Date.now(), sleepSeconds)
+  }
+
+  private async getPossibleUpgrades() {
+    let upgrades = await this.api.getUpgrades()
+
+    // TODO: delete after Hamsters`s developer will fix bugs with duplicate upgrade items
+    upgrades = [...new Map(upgrades.map((item) => [item.id, item])).values()]
+
+    const channelsToSubscribe = upgrades.filter(
       ({ isAvailable, isExpired, condition }) =>
-        !isAvailable && !isExpired && condition && condition._type === 'SubscribeTelegramChannel',
+        !isAvailable && !isExpired && condition?._type === 'SubscribeTelegramChannel',
     )
 
     await Promise.all(
-      channelsToSubscribe.map(async ({ condition }) => {
+      channelsToSubscribe.map(async (upgrade: UpgradeItem) => {
         await wait()
-        await this.subscribeToChannel(condition!.link)
+        await this.subscribeToChannel(upgrade.condition!.link)
+        upgrade.isAvailable = true
       }),
     )
 
-    const availableUpgrades = data
-      .filter(
-        ({ isAvailable: isUnlock, isExpired, level, maxLevel = 999, cooldownSeconds = 0 }) => {
-          const isAvailable = isUnlock && !isExpired
-          const hasMaxUpgradeLevel = level >= max_upgrade_lvl
-          const isAvailableToUpgrade = maxLevel > level
-          const isCooldown = cooldownSeconds !== 0
-
-          return isAvailable && !hasMaxUpgradeLevel && isAvailableToUpgrade && !isCooldown
-        },
-      )
+    return upgrades
+      .filter(({ isAvailable, isExpired, level, maxLevel = 999 }) => {
+        const hasMaxUpgradeLevel = level >= max_upgrade_lvl
+        const isAvailableToUpgrade = maxLevel > level
+        return isAvailable && !isExpired && !hasMaxUpgradeLevel && isAvailableToUpgrade
+      })
       .sort((a, b) => {
         const a_ppr = a.profitPerHourDelta / a.price
         const b_ppr = b.profitPerHourDelta / b.price
 
         return b_ppr - a_ppr
       })
-
-    return availableUpgrades
   }
 
-  private async buyUpgrade(upgrades: UpgradeItem[]) {
-    const info = await Api.getProfileInfo(this.ax)
-    this.updateState(info)
-    let balance = info.balanceCoins
-    let totalCostAllUpgrades = []
-    let atLeastOneBought = false
+  private async buyUpgrades(): Promise<Date> {
+    // TODO approximate combo profit
+    // await this.claimCombo()
 
-    // TODO: delete after Hamsters`s developer will fix bugs with duplicate upgrade items
-    const uniqueUpgrades = [...new Map(upgrades.map((item) => [item.id, item])).values()]
-
-    for (const { price, id, level, profitPerHourDelta } of uniqueUpgrades) {
-      if (balance >= price) {
-        const res = await Api.buyUpgrade(this.ax, id)
-        balance -= price
-        atLeastOneBought = true
-
-        log.success(
-          `Upgraded [${id}] to ${level} lvl | +${formatNum(profitPerHourDelta)} | EPH: ${formatNum(res.earnPassivePerHour)} | Balance: ${formatNum(balance)}`,
-          this.client.name,
-        )
-        await wait()
-      } else {
-        totalCostAllUpgrades.push(price)
-        log.warn(
-          `Insufficient balance to upgrade [${id}] to ${level} lvl | Price: ${formatNum(price)} | Balance ${formatNum(balance)}`,
-          this.client.name,
-        )
+    while (true) {
+      const possibleUpgrades = await this.getPossibleUpgrades()
+      await wait()
+      if (!possibleUpgrades.length) {
+        log.warn(`No upgrades available: Sleep for 1 hour`, this.client.name)
+        return addHours(Date.now(), 1)
       }
-    }
+      const bestUpgrade = possibleUpgrades.find(({ cooldownSeconds = 0 }) => cooldownSeconds === 0)
+      if (bestUpgrade && bestUpgrade.price <= this.state.balanceCoins) {
+        await this.buyUpgrade(bestUpgrade)
+        await wait()
+        continue
+      }
 
-    if (atLeastOneBought) return
-
-    const data = await Api.getProfileInfo(this.ax)
-    this.updateState(data)
-    const { earnPassivePerSec, balanceCoins } = data
-    const maxPrice = Math.max(...totalCostAllUpgrades)
-
-    if (maxPrice > balanceCoins) {
-      const upgradeWaitTime = Math.ceil((maxPrice - balanceCoins) / earnPassivePerSec)
+      const nextUpgrade = possibleUpgrades[0]
+      if (nextUpgrade.cooldownSeconds) {
+        log.info(
+          `No upgrades available: Wait for upgrade cooldown [${nextUpgrade.id}] ${secToTime(nextUpgrade.cooldownSeconds)}`,
+          this.client.name,
+        )
+        return addSeconds(Date.now(), nextUpgrade.cooldownSeconds)
+      }
 
       log.warn(
-        `Approximate time for rebalancing: ${msToTime(upgradeWaitTime * 1000).formattedTime}`,
+        `Insufficient balance to upgrade [${nextUpgrade.id}] to ${nextUpgrade.level} lvl | Price: ${formatNum(nextUpgrade.price)} | Balance ${formatNum(this.state.balanceCoins)}`,
         this.client.name,
       )
 
-      this.upgradeSleep = time() + upgradeWaitTime
+      const upgradeWaitSeconds = Math.ceil(
+        (nextUpgrade.price - this.state.balanceCoins) / this.state.earnPassivePerSec,
+      )
+
+      log.info(
+        `Approximate time for rebalancing: ${secToTime(upgradeWaitSeconds)}`,
+        this.client.name,
+      )
+
+      return addSeconds(Date.now(), upgradeWaitSeconds)
     }
+  }
+
+  private async buyUpgrade(upgrade: UpgradeItem) {
+    const { id, level, profitPerHourDelta } = upgrade
+    const data = await this.api.buyUpgrade(id)
+    this.updateState(data)
+    log.success(
+      `Upgraded [${id}] to ${level} lvl | +${formatNum(profitPerHourDelta)} | EPH: ${formatNum(data.earnPassivePerHour)} | Balance: ${formatNum(data.balanceCoins)}`,
+      this.client.name,
+    )
   }
 
   async start() {
@@ -349,103 +384,34 @@ export class Automator extends TGClient {
       await wait()
 
       while (true) {
-        const {
-          turboBoostLastUpdate,
-          exchangeId,
-          energyBoostLastUpdate,
-          availableTaps,
-          maxEnergy,
-          tapsRecoverPerSec,
-          lastCompletedDaily,
-        } = this.state
-
-        const isTokenExpired = time() - this.tokenCreatedTime >= ONE_HOUR_TIMESTAMP
-        const isDailyTurboReady = time() - turboBoostLastUpdate > ONE_DAY_TIMESTAMP && false // Turbo is not available in the app right now
-        const isDailyEnergyReady = time() - energyBoostLastUpdate > ONE_HOUR_TIMESTAMP
-        const isDailyTaskAvailable = time() - lastCompletedDaily > ONE_DAY_TIMESTAMP
-
         try {
-          if (isTokenExpired) {
-            await this.auth(tgWebData)
-            await wait()
-            continue
-          }
+          await this.refreshToken(tgWebData)
+          await this.getProfileInfo()
+          await this.selectExchange()
+          await this.claimCipher()
+          await this.completeDailyTask()
 
-          if (!this.isStateInit) {
-            await this.setProfileInfo()
-            await wait()
-            continue
-          }
+          // TODO use dates not sleep seconds cause buy mode takes time too
+          let nextRun = addHours(new Date(), 1)
 
-          if (exchangeId === 'hamster') {
-            await this.selectExchange()
-            await wait()
-            continue
-          }
-
-          if (time() > this.cipherAvailableAt) {
-            await this.claimCipher()
-            await wait()
-            continue
-          }
-
-          if (isDailyTaskAvailable) {
-            await this.completeDailyTask()
-            await wait()
-            continue
-          }
-
-          if (time() > this.comboAvailableAt) {
-            await this.claimDailyCombo()
-            continue
+          if (tap_mode) {
+            const coinsNextRun = await this.tapCoins()
+            nextRun = min([nextRun, coinsNextRun])
           }
 
           if (buy_mode) {
-            if (!isDailyTurboReady && time() > this.upgradeSleep) {
-              const upgrades = await this.getAvailableUpgrades()
-
-              if (upgrades.length !== 0) {
-                await this.buyUpgrade(upgrades)
-                await this.claimCombo()
-              }
-              continue
-            }
+            // TODO daily combo
+            // await this.claimDailyCombo()
+            const buyNextRun = await this.buyUpgrades()
+            nextRun = min([nextRun, buyNextRun])
           }
 
-          if (tap_mode) {
-            if (isDailyTurboReady) {
-              await this.applyDailyTurbo()
-              await wait()
-              continue
-            }
-
-            if (min_energy <= availableTaps) {
-              const [min, max] = sleep_between_taps
-              const sleepTime = getRandomRangeNumber(min, max)
-
-              await this.sendTaps()
-              await wait(sleepTime)
-              continue
-            }
-
-            if (isDailyEnergyReady && time() > this.energyBoostTimeout) {
-              await this.applyDailyEnergy()
-              await wait()
-            } else {
-              const sleepTime = (maxEnergy - availableTaps) / tapsRecoverPerSec
-              const timeInMinutes = Math.round((maxEnergy - availableTaps) / tapsRecoverPerSec / 60)
-
-              log.info(
-                `Minimum energy reached: ${availableTaps} | Approximate energy recovery time ${timeInMinutes} minutes`,
-                this.client.name,
-              )
-
-              await wait(sleepTime)
-            }
-          }
+          log.info(`Next run at ${nextRun.toString()}}`, this.client.name)
+          await wait(differenceInSeconds(nextRun.getTime(), Date.now()))
         } catch (e) {
           log.error(String(e), this.client.name)
           await wait(15)
+          continue
         }
       }
     } catch (error) {
