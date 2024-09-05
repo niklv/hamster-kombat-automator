@@ -109,6 +109,18 @@ export interface ProfileModel {
   clickerUser: ClickerUser
 }
 
+export interface MiniGameModel {
+  bonusKeys: number
+  isClaimed: boolean
+  levelConfig: string
+  remainSeconds: number
+  remainSecondsToGuess: number
+  remainSecondsToNextAttempt: number
+  startDate: string
+  totalSecondsToNextAttempt: number
+  youtubeUrl: string
+}
+
 export interface TasksListModel {
   tasks: Task[]
 }
@@ -136,9 +148,10 @@ export interface BoostsModel {
   }[]
 }
 
-export interface DailyCipherModel {
+export interface ConfigModel {
   clickerUser: ClickerUser
   dailyCipher: Cipher
+  dailyKeysMiniGame: MiniGameModel
 }
 
 export interface ComboModel {

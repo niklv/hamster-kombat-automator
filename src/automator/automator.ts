@@ -22,7 +22,6 @@ const {
 
 export class Automator extends TGClient {
   private tokenCreatedTime = 0
-  private upgradeSleep = 0
   private energyBoostTimeout = 0
   private cipherAvailableAt = 0
   private comboAvailableAt = 0
@@ -39,7 +38,6 @@ export class Automator extends TGClient {
     earnPassivePerSec: 0,
     earnPerTap: 1,
   }
-  private isStateInited = false
   private readonly api: ApiService
 
   constructor(props: AccountModel) {
@@ -67,7 +65,6 @@ export class Automator extends TGClient {
       earnPerTap: info.earnPerTap,
       lastCompletedDaily,
     }
-    this.isStateInited = true
   }
 
   private async refreshToken(tgWebData: string) {
@@ -104,6 +101,7 @@ export class Automator extends TGClient {
   private async completeDailyTask() {
     if (time() - this.state.lastCompletedDaily < ONE_DAY_TIMESTAMP) return
     const tasks = await this.api.getTasks()
+    console.log(tasks)
     const dailyTask = tasks.find(({ id }) => id === DAILY_TASK_ID)
 
     if (!dailyTask?.isCompleted) {
@@ -119,6 +117,10 @@ export class Automator extends TGClient {
         )
     }
     await wait()
+  }
+
+  private async completePuzzle() {
+    // TODO
   }
 
   private async applyDailyTurbo() {
@@ -144,8 +146,8 @@ export class Automator extends TGClient {
   }
 
   private async sendTaps(count?: number) {
-    const [min, max] = taps_count_range
-    const tapsCount = count || getRandomRangeNumber(min, max)
+    const [min_taps, max_taps] = taps_count_range
+    const tapsCount = count || getRandomRangeNumber(min_taps, max_taps)
 
     const data = await this.api.sendTaps(tapsCount, this.state.availableTaps)
     this.updateState(data)
@@ -263,8 +265,8 @@ export class Automator extends TGClient {
     // 1. first tap all available coins
     while (this.state.earnPerTap < this.state.availableTaps) {
       await this.sendTaps()
-      const [min, max] = sleep_between_taps
-      const sleepTime = getRandomRangeNumber(min, max)
+      const [min_sleep, max_sleep] = sleep_between_taps
+      const sleepTime = getRandomRangeNumber(min_sleep, max_sleep)
       await wait(sleepTime)
     }
 
@@ -390,6 +392,7 @@ export class Automator extends TGClient {
           await this.selectExchange()
           await this.claimCipher()
           await this.completeDailyTask()
+          await this.completePuzzle()
 
           // TODO use dates not sleep seconds cause buy mode takes time too
           let nextRun = addHours(new Date(), 1)
@@ -401,7 +404,7 @@ export class Automator extends TGClient {
 
           if (buy_mode) {
             // TODO daily combo
-            // await this.claimDailyCombo()
+            await this.claimDailyCombo()
             const buyNextRun = await this.buyUpgrades()
             nextRun = min([nextRun, buyNextRun])
           }

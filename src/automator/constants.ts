@@ -1,6 +1,6 @@
 import { config } from '~/config'
 
-export const DAILY_TASK_ID = 'streak_days'
+export const DAILY_TASK_ID = 'streak_days_special'
 
 export const BOT_MASTER_AXIOS_CONFIG = {
   baseURL: `https://${config.info.api}/`,
@@ -30,5 +30,6 @@ export const API_MAP = {
   cipher: '/clicker/claim-daily-cipher',
   claimCombo: '/clicker/claim-daily-combo',
   tap: '/clicker/tap',
+  startMiniGame: '/clicker/start-keys-minigame',
   config: '/clicker/config',
 } as const

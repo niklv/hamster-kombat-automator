@@ -3,7 +3,7 @@ import {
   BoostsModel,
   ComboModel,
   CompletedTaskModel,
-  DailyCipherModel,
+  ConfigModel,
   LoginResponseModel,
   ProfileModel,
   TasksListModel,
@@ -158,7 +158,7 @@ export class ApiService {
 
   async getConfig() {
     try {
-      return await this.axios.post<DailyCipherModel>(API_MAP.config, {
+      return await this.axios.post<ConfigModel>(API_MAP.config, {
         data: {},
       })
     } catch (e) {
@@ -166,9 +166,19 @@ export class ApiService {
     }
   }
 
+  async startMiniGame() {
+    try {
+      return await this.axios.post<ConfigModel>(API_MAP.startMiniGame, {
+        data: {},
+      })
+    } catch (e) {
+      throw new Error(`Api | startMiniGame() | ${e}`)
+    }
+  }
+
   async claimDailyCipher(cipher: string) {
     try {
-      return await this.axios.post<DailyCipherModel>(API_MAP.cipher, {
+      return await this.axios.post<ConfigModel>(API_MAP.cipher, {
         data: { cipher: cipher.toUpperCase() },
       })
     } catch (e) {
